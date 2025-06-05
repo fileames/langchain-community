@@ -64,6 +64,8 @@ class FilterGroup(TypedDict, total=False):
 
 def _convert_oper_to_sql(oper: str) -> str:
     oper_map = {"EQ": "==", "GT": ">", "LT": "<", "GTE": ">=", "LTE": "<="}
+    if oper not in oper_map:
+        raise RuntimeError("Filter operation {} not supported".format(oper))
     return oper_map.get(oper, "==")
 
 
@@ -569,6 +571,11 @@ class OracleVS(VectorStore):
             if _compare_version(oracledb.__version__, "2.1.0"):
                 self.insert_mode = "clob"
 
+        self.json_insert_mode = "clob"
+        if (hasattr(connection, "thin") and connection.thin) or oracledb.clientversion()[0] >= 21:
+            self.json_insert_mode = "json"
+            self.json_type = oracledb.DB_TYPE_JSON
+
         try:
             """Initialize with oracledb client."""
             self.client = client
@@ -691,14 +698,14 @@ class OracleVS(VectorStore):
         docs: List[Tuple[Any, Any, Any, Any]]
         if self.insert_mode == "clob":
             docs = [
-                (id_, json.dumps(embedding), json.dumps(metadata), text)
+                (id_, json.dumps(embedding), json.dumps(metadata) if self.json_insert_mode != "json" else metadata, text)
                 for id_, embedding, metadata, text in zip(
                     processed_ids, embeddings, metadatas, texts
                 )
             ]
         else:
             docs = [
-                (id_, array.array("f", embedding), json.dumps(metadata), text)
+                (id_, array.array("f", embedding), json.dumps(metadata) if self.json_insert_mode != "json" else metadata, text)
                 for id_, embedding, metadata, text in zip(
                     processed_ids, embeddings, metadatas, texts
                 )
@@ -708,6 +715,8 @@ class OracleVS(VectorStore):
         if connection is None:
             raise ValueError("Failed to acquire a connection.")
         with connection.cursor() as cursor:
+            if self.json_insert_mode == "json":
+                cursor.setinputsizes(None, None, self.json_type, None)
             cursor.executemany(
                 f"INSERT INTO {self.table_name} (id, embedding, metadata, "
                 f"text) VALUES (:1, :2, :3, :4)",
@@ -838,7 +847,12 @@ class OracleVS(VectorStore):
 
             # Filter results if filter is provided
             for result in results:
-                metadata = dict(result[2]) if isinstance(result[2], dict) else {}
+                if not result[2]: # None
+                    metadata = {}
+                elif isinstance(result[2], dict): # Dict
+                    metadata = dict(result[2]) 
+                else: # LOB
+                    metadata = json.loads(self._get_clob_value(result[2])) or {}
 
                 # Apply filtering based on the 'filter' dictionary
                 if filter:
@@ -920,8 +934,13 @@ class OracleVS(VectorStore):
 
             for result in results:
                 page_content_str = self._get_clob_value(result[1])
-                metadata = result[2] if isinstance(result[2], dict) else {}
-
+                if not result[2]: # None
+                    metadata = {}
+                elif isinstance(result[2], dict): # Dict
+                    metadata = dict(result[2]) 
+                else: # LOB
+                    metadata = json.loads(self._get_clob_value(result[2])) or {}
+                
                 # Apply filter if provided and matches; otherwise, add all
                 # documents
                 if not filter or all(
