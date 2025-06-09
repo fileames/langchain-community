@@ -65,7 +65,7 @@ class FilterGroup(TypedDict, total=False):
 def _convert_oper_to_sql(oper: str) -> str:
     oper_map = {"EQ": "==", "GT": ">", "LT": "<", "GTE": ">=", "LTE": "<="}
     if oper not in oper_map:
-        raise RuntimeError("Filter operation {} not supported".format(oper))
+        raise ValueError("Filter operation {} not supported".format(oper))
     return oper_map.get(oper, "==")
 
 
