@@ -97,7 +97,7 @@ def _handle_exceptions(func: T) -> T:
     return cast(T, wrapper)
 
 
-def _table_exists(connection: Connection, table_name: str) -> bool:
+def _table_exists(connection: Connection, table_name: str, hint: Optional[str] = "") -> bool:
     try:
         import oracledb
     except ImportError as e:
@@ -107,7 +107,7 @@ def _table_exists(connection: Connection, table_name: str) -> bool:
 
     try:
         with connection.cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            cursor.execute(f"SELECT {hint} COUNT(*) FROM {table_name}")
             return True
     except oracledb.DatabaseError as ex:
         err_obj = ex.args
@@ -133,10 +133,10 @@ def _compare_version(version: str, target_version: str) -> bool:
 
 
 @_handle_exceptions
-def _index_exists(connection: Connection, index_name: str) -> bool:
+def _index_exists(connection: Connection, index_name: str, hint: Optional[str] = "") -> bool:
     # Check if the index exists
-    query = """
-        SELECT index_name 
+    query = f"""
+        SELECT {hint} index_name 
         FROM all_indexes 
         WHERE upper(index_name) = upper(:idx_name)
         """
@@ -173,7 +173,7 @@ def _get_index_name(base_name: str) -> str:
 
 
 @_handle_exceptions
-def _create_table(connection: Connection, table_name: str, embedding_dim: int) -> None:
+def _create_table(connection: Connection, table_name: str, embedding_dim: int, hint: str = "") -> None:
     cols_dict = {
         "id": "RAW(16) DEFAULT SYS_GUID() PRIMARY KEY",
         "text": "CLOB",
@@ -181,7 +181,7 @@ def _create_table(connection: Connection, table_name: str, embedding_dim: int) -
         "embedding": f"vector({embedding_dim}, FLOAT32)",
     }
 
-    if not _table_exists(connection, table_name):
+    if not _table_exists(connection, table_name, hint):
         with connection.cursor() as cursor:
             ddl_body = ", ".join(
                 f"{col_name} {col_type}" for col_name, col_type in cols_dict.items()
@@ -198,6 +198,7 @@ def create_index(
     client: Any,
     vector_store: OracleVS,
     params: Optional[dict[str, Any]] = None,
+    hint: Optional[str] = "",
 ) -> None:
     connection = _get_connection(client)
     if connection is None:
@@ -209,6 +210,7 @@ def create_index(
                 vector_store.table_name,
                 vector_store.distance_strategy,
                 params,
+                hint
             )
         elif params["idx_type"] == "IVF":
             _create_ivf_index(
@@ -216,6 +218,7 @@ def create_index(
                 vector_store.table_name,
                 vector_store.distance_strategy,
                 params,
+                hint
             )
         else:
             _create_hnsw_index(
@@ -223,10 +226,11 @@ def create_index(
                 vector_store.table_name,
                 vector_store.distance_strategy,
                 params,
+                hint
             )
     else:
         _create_hnsw_index(
-            connection, vector_store.table_name, vector_store.distance_strategy, params
+            connection, vector_store.table_name, vector_store.distance_strategy, params, hint
         )
     return
 
@@ -237,6 +241,7 @@ def _create_hnsw_index(
     table_name: str,
     distance_strategy: DistanceStrategy,
     params: Optional[dict[str, Any]] = None,
+    hint: Optional[str] = ""
 ) -> None:
     defaults = {
         "idx_name": "HNSW",
@@ -307,7 +312,7 @@ def _create_hnsw_index(
     ddl = ddl_assembly.format(**config)
 
     # Check if the index exists
-    if not _index_exists(connection, config["idx_name"]):
+    if not _index_exists(connection, config["idx_name"], hint):
         with connection.cursor() as cursor:
             cursor.execute(ddl)
             logger.info("Index created successfully...")
@@ -321,6 +326,7 @@ def _create_ivf_index(
     table_name: str,
     distance_strategy: DistanceStrategy,
     params: Optional[dict[str, Any]] = None,
+    hint: Optional[str] = ""
 ) -> None:
     # Default configuration
     defaults = {
@@ -379,7 +385,7 @@ def _create_ivf_index(
     ddl = ddl_assembly.format(**config)
 
     # Check if the index exists
-    if not _index_exists(connection, config["idx_name"]):
+    if not _index_exists(connection, config["idx_name"], hint):
         with connection.cursor() as cursor:
             cursor.execute(ddl)
         logger.info("Index created successfully...")
@@ -388,7 +394,7 @@ def _create_ivf_index(
 
 
 @_handle_exceptions
-def drop_table_purge(client: Any, table_name: str) -> None:
+def drop_table_purge(client: Any, table_name: str, hint: Optional[str] = "") -> None:
     """Drop a table and purge it from the database.
 
     Args:
@@ -401,7 +407,7 @@ def drop_table_purge(client: Any, table_name: str) -> None:
     connection = _get_connection(client)
     if connection is None:
         raise ValueError("Failed to acquire a connection.")
-    if _table_exists(connection, table_name):
+    if _table_exists(connection, table_name, hint):
         with connection.cursor() as cursor:
             ddl = f"DROP TABLE {table_name} PURGE"
             cursor.execute(ddl)
@@ -412,7 +418,7 @@ def drop_table_purge(client: Any, table_name: str) -> None:
 
 
 @_handle_exceptions
-def drop_index_if_exists(client: Any, index_name: str) -> None:
+def drop_index_if_exists(client: Any, index_name: str, hint: Optional[str] = "") -> None:
     """Drop an index if it exists.
 
     Args:
@@ -425,7 +431,7 @@ def drop_index_if_exists(client: Any, index_name: str) -> None:
     connection = _get_connection(client)
     if connection is None:
         raise ValueError("Failed to acquire a connection.")
-    if _index_exists(connection, index_name):
+    if _index_exists(connection, index_name, hint):
         drop_query = f"DROP INDEX {index_name}"
         with connection.cursor() as cursor:
             cursor.execute(drop_query)
@@ -469,6 +475,7 @@ class OracleVS(VectorStore):
         distance_strategy: DistanceStrategy = DistanceStrategy.EUCLIDEAN_DISTANCE,
         query: Optional[str] = "What is a Oracle database",
         params: Optional[Dict[str, Any]] = None,
+        hint: Optional[str] = "/*+ OPT_PARAM('cell_offload_processing' 'false') */",
     ):
         try:
             import oracledb
@@ -531,7 +538,8 @@ class OracleVS(VectorStore):
             self.table_name = table_name
             self.distance_strategy = distance_strategy
             self.params = params
-            _create_table(connection, table_name, embedding_dim)
+            self.hint = hint
+            _create_table(connection, table_name, embedding_dim, self.hint)
         except oracledb.DatabaseError as db_err:
             logger.exception(f"Database error occurred while create table: {db_err}")
             raise RuntimeError(
@@ -654,7 +662,7 @@ class OracleVS(VectorStore):
             raise ValueError("Failed to acquire a connection.")
         with connection.cursor() as cursor:
             cursor.executemany(
-                f"INSERT INTO {self.table_name} (id, embedding, metadata, "
+                f"INSERT {self.hint} INTO {self.table_name} (id, embedding, metadata, "
                 f"text) VALUES (:1, :2, :3, :4)",
                 docs,
             )
@@ -748,7 +756,7 @@ class OracleVS(VectorStore):
             embedding_arr = array.array("f", embedding)
 
         query = f"""
-            SELECT id,
+            SELECT {self.hint} id,
               text,
               metadata,
               vector_distance(embedding, :embedding,
@@ -814,7 +822,7 @@ class OracleVS(VectorStore):
         documents = []
 
         query = f"""
-            SELECT id,
+            SELECT {self.hint} id,
               text,
               metadata,
               vector_distance(embedding, :embedding, {
@@ -1022,7 +1030,7 @@ class OracleVS(VectorStore):
         # Constructing the SQL statement with individual placeholders
         placeholders = ", ".join([":id" + str(i + 1) for i in range(len(hashed_ids))])
 
-        ddl = f"DELETE FROM {self.table_name} WHERE id IN ({placeholders})"
+        ddl = f"DELETE {self.hint} FROM {self.table_name} WHERE id IN ({placeholders})"
 
         # Preparing bind variables
         bind_vars = {
@@ -1063,7 +1071,7 @@ class OracleVS(VectorStore):
 
         query = kwargs.get("query", "What is a Oracle database")
 
-        drop_table_purge(client, table_name)
+        drop_table_purge(client, table_name, self.hint)
 
         vss = cls(
             client=client,

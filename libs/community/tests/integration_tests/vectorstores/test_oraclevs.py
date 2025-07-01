@@ -773,6 +773,17 @@ def test_embed_documents_test() -> None:
     vs_obj._embed_documents(["hello", "yash"])
     drop_table_purge(connection, "TB7")
 
+    # 5. Wrong hint
+    # Expectation:Vector Printed
+    model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+    error_happened = False
+    try:
+        vs_obj = OracleVS(connection, model, "TB7", DistanceStrategy.EUCLIDEAN_DISTANCE, hint = "/*+ OPT_PARAM('cell_offload_processing' 'false') *")
+    except:
+        error_happened = True
+
+    assert error_happened
+
 
 ##################################
 ####### embed_query(text) ########
